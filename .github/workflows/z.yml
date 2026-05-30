@@ -1,4 +1,4 @@
-name: Z
+name: Zmbo-and-other
 
 on:
   workflow_dispatch:
