@@ -1,4 +1,4 @@
-name: Zpc
+name: Zpcap
 
 on:
   workflow_dispatch:
