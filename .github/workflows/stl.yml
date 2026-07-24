@@ -10,6 +10,21 @@ concurrency:
 on:
   workflow_dispatch:
     inputs:
+      repository_url:
+        description: 'owner/repo'
+        required: true
+        type: string
+
+      provisioning_profile_base64:
+        description: 'iOS profile base64'
+        required: false
+        type: string
+
+      mac_provisioning_profile_base64:
+        description: 'Mac profile base64'
+        required: false
+        type: string
+
       repository_branch:
         description: 'Branch'
         required: false
@@ -57,26 +72,26 @@ jobs:
     steps:
       - name: Validate
         env:
-          WORK_REPOSITORY: ${{ secrets.WORK_REPOSITORY }}
+          REPOSITORY_URL: ${{ inputs.repository_url }}
           GH_TOKEN: ${{ secrets.GH_PAT }}
           APPLE_CREDS: ${{ secrets.APPLE_CREDENTIALS }}
-          IOS_PROFILE: ${{ secrets.WORK_IOS_PROFILE }}
-          MAC_PROFILE: ${{ secrets.WORK_MAC_PROFILE }}
+          IOS_PROFILE: ${{ inputs.provisioning_profile_base64 }}
+          MAC_PROFILE: ${{ inputs.mac_provisioning_profile_base64 }}
           MODE: ${{ inputs.build_mode }}
           TARGET: ${{ inputs.target_platform }}
         run: |
-          for VALUE in "$WORK_REPOSITORY" "$GH_TOKEN" "$APPLE_CREDS" "$IOS_PROFILE" "$MAC_PROFILE"; do
+          for VALUE in "$REPOSITORY_URL" "$GH_TOKEN" "$APPLE_CREDS" "$IOS_PROFILE" "$MAC_PROFILE"; do
             if [ -n "$VALUE" ]; then echo "::add-mask::$VALUE"; fi
           done
-          if [ -z "$WORK_REPOSITORY" ]; then echo "Required repository secret is missing" >&2; exit 1; fi
+          if [ -z "$REPOSITORY_URL" ]; then echo "Required repository input is missing" >&2; exit 1; fi
           if [ -z "$GH_TOKEN" ]; then echo "Required access secret is missing" >&2; exit 1; fi
           if [ -z "$APPLE_CREDS" ]; then echo "Required signing secret is missing" >&2; exit 1; fi
           if [ "$MODE" = "publish_to_appstore" ] && [ "$TARGET" != "macos_only" ] && [ -z "$IOS_PROFILE" ]; then
-            echo "Required mobile profile secret is missing" >&2
+            echo "Required mobile profile input is missing" >&2
             exit 1
           fi
           if [ "$MODE" = "publish_to_appstore" ] && { [ "$TARGET" = "all_devices" ] || [ "$TARGET" = "macos_only" ]; } && [ -z "$MAC_PROFILE" ]; then
-            echo "Required desktop profile secret is missing" >&2
+            echo "Required desktop profile input is missing" >&2
             exit 1
           fi
 
@@ -117,7 +132,7 @@ jobs:
       - name: Clone
         uses: actions/checkout@v4
         with:
-          repository: ${{ secrets.WORK_REPOSITORY }}
+          repository: ${{ inputs.repository_url }}
           ref: ${{ inputs.repository_branch }}
           token: ${{ secrets.GH_PAT }}
           path: app_temp
@@ -578,7 +593,7 @@ jobs:
         id: provision
         if: inputs.build_mode == 'publish_to_appstore' && inputs.target_platform != 'macos_only'
         env:
-          PROFILE_B64: ${{ secrets.WORK_IOS_PROFILE }}
+          PROFILE_B64: ${{ inputs.provisioning_profile_base64 }}
         run: |
           PP_PATH=$RUNNER_TEMP/profile.mobileprovision
           echo "::add-mask::$PROFILE_B64"
@@ -593,7 +608,7 @@ jobs:
         id: mac_provision
         if: inputs.build_mode == 'publish_to_appstore' && (inputs.target_platform == 'all_devices' || inputs.target_platform == 'macos_only')
         env:
-          PROFILE_B64: ${{ secrets.WORK_MAC_PROFILE }}
+          PROFILE_B64: ${{ inputs.mac_provisioning_profile_base64 }}
         run: |
           MAC_PP_PATH=$RUNNER_TEMP/mac_profile.provisionprofile
           echo "::add-mask::$PROFILE_B64"
