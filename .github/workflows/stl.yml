@@ -596,13 +596,18 @@ jobs:
           PROFILE_B64: ${{ inputs.provisioning_profile_base64 }}
         run: |
           PP_PATH=$RUNNER_TEMP/profile.mobileprovision
+          PP_PLIST=$RUNNER_TEMP/profile.plist
           echo "::add-mask::$PROFILE_B64"
           printf '%s' "$PROFILE_B64" | base64 --decode > $PP_PATH
-          UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(security cms -D -i $PP_PATH))
+          security cms -D -i $PP_PATH > $PP_PLIST
+          UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" $PP_PLIST)
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" $PP_PLIST)
           echo "::add-mask::$UUID"
+          echo "::add-mask::$PROFILE_NAME"
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/$UUID.mobileprovision
           echo "uuid=$UUID" >> $GITHUB_OUTPUT
+          echo "name=$PROFILE_NAME" >> $GITHUB_OUTPUT
 
       - name: Mac Profile
         id: mac_provision
@@ -611,13 +616,18 @@ jobs:
           PROFILE_B64: ${{ inputs.mac_provisioning_profile_base64 }}
         run: |
           MAC_PP_PATH=$RUNNER_TEMP/mac_profile.provisionprofile
+          MAC_PP_PLIST=$RUNNER_TEMP/mac_profile.plist
           echo "::add-mask::$PROFILE_B64"
           printf '%s' "$PROFILE_B64" | base64 --decode > $MAC_PP_PATH
-          MAC_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(security cms -D -i $MAC_PP_PATH))
+          security cms -D -i $MAC_PP_PATH > $MAC_PP_PLIST
+          MAC_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" $MAC_PP_PLIST)
+          MAC_PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" $MAC_PP_PLIST)
           echo "::add-mask::$MAC_UUID"
+          echo "::add-mask::$MAC_PROFILE_NAME"
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp $MAC_PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/$MAC_UUID.provisionprofile
           echo "uuid=$MAC_UUID" >> $GITHUB_OUTPUT
+          echo "name=$MAC_PROFILE_NAME" >> $GITHUB_OUTPUT
 
       - name: Version
         working-directory: app/ios/App
@@ -722,7 +732,9 @@ jobs:
         working-directory: app/ios/App
         env:
           IOS_PROFILE_UUID: ${{ steps.provision.outputs.uuid }}
+          IOS_PROFILE_NAME: ${{ steps.provision.outputs.name }}
           MAC_PROFILE_UUID: ${{ steps.mac_provision.outputs.uuid }}
+          MAC_PROFILE_NAME: ${{ steps.mac_provision.outputs.name }}
         run: |
           echo "require 'xcodeproj'" > disable_signing.rb
           echo "project = Xcodeproj::Project.open('App.xcodeproj')" >> disable_signing.rb
@@ -734,9 +746,9 @@ jobs:
           echo "  config.build_settings.delete('PROVISIONING_PROFILE')" >> disable_signing.rb
           echo "  config.build_settings.delete('PROVISIONING_PROFILE_SPECIFIER')" >> disable_signing.rb
           echo "  config.build_settings['PROVISIONING_PROFILE[sdk=iphoneos*]'] = ENV['IOS_PROFILE_UUID'] if ENV['IOS_PROFILE_UUID'] && !ENV['IOS_PROFILE_UUID'].empty?" >> disable_signing.rb
-          echo "  config.build_settings['PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]'] = ''" >> disable_signing.rb
+          echo "  config.build_settings['PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]'] = ENV['IOS_PROFILE_NAME'] if ENV['IOS_PROFILE_NAME'] && !ENV['IOS_PROFILE_NAME'].empty?" >> disable_signing.rb
           echo "  config.build_settings['PROVISIONING_PROFILE[sdk=macosx*]'] = ENV['MAC_PROFILE_UUID'] if ENV['MAC_PROFILE_UUID'] && !ENV['MAC_PROFILE_UUID'].empty?" >> disable_signing.rb
-          echo "  config.build_settings['PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]'] = ''" >> disable_signing.rb
+          echo "  config.build_settings['PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]'] = ENV['MAC_PROFILE_NAME'] if ENV['MAC_PROFILE_NAME'] && !ENV['MAC_PROFILE_NAME'].empty?" >> disable_signing.rb
           echo "end" >> disable_signing.rb
           echo "project.save" >> disable_signing.rb
           ruby disable_signing.rb
@@ -773,9 +785,13 @@ jobs:
           configure_desktop_pods() {
             if [ -f "Podfile.ios" ]; then
               cp Podfile.ios Podfile
-              sed -i.bak -E '/(AdMob|Google-Mobile-Ads-SDK|GoogleMobileAds|GoogleUserMessagingPlatform)/Id' Podfile
+              sed -i.bak '/CapacitorCommunityAdmob/d' Podfile
               rm -f Podfile.bak
               pod install
+            fi
+            if grep -q 'CapacitorCommunityAdmob' Podfile.lock || grep -q 'CapacitorCommunityAdmob' Pods/Manifest.lock; then
+              echo "Desktop dependency removal failed" >&2
+              exit 1
             fi
             apply_pod_settings
             verify_pod_targets
@@ -884,17 +900,40 @@ jobs:
             export FASTLANE_XCODEBUILD_SETTINGS_RETRIES=6
 
             if [ "${{ inputs.target_platform }}" != "macos_only" ]; then
+              IOS_PROFILE_UUID="${{ steps.provision.outputs.uuid }}"
+              IOS_PROFILE_NAME="${{ steps.provision.outputs.name }}"
+              BUNDLE_ID="${{ steps.capacitor.outputs.bundle_id }}"
+              if [ -z "$IOS_PROFILE_UUID" ] || [ -z "$IOS_PROFILE_NAME" ]; then exit 1; fi
+
+              echo '<?xml version="1.0" encoding="UTF-8"?>' > iOSExportOptions.plist
+              echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> iOSExportOptions.plist
+              echo '<plist version="1.0"><dict>' >> iOSExportOptions.plist
+              echo '  <key>method</key><string>app-store</string>' >> iOSExportOptions.plist
+              echo "  <key>teamID</key><string>$TEAM_ID</string>" >> iOSExportOptions.plist
+              echo '  <key>destination</key><string>export</string>' >> iOSExportOptions.plist
+              echo '  <key>signingStyle</key><string>manual</string>' >> iOSExportOptions.plist
+              echo '  <key>provisioningProfiles</key><dict>' >> iOSExportOptions.plist
+              echo "    <key>$BUNDLE_ID</key><string>$IOS_PROFILE_NAME</string>" >> iOSExportOptions.plist
+              echo '  </dict>' >> iOSExportOptions.plist
+              echo '</dict></plist>' >> iOSExportOptions.plist
+
+              MAPPED_PROFILE=$(/usr/libexec/PlistBuddy -c "Print :provisioningProfiles:$BUNDLE_ID" iOSExportOptions.plist)
+              if [ "$MAPPED_PROFILE" != "$IOS_PROFILE_NAME" ]; then exit 1; fi
+
               restore_mobile_pods
               fastlane run build_app \
                 $FL_ARG scheme:"App" export_method:"app-store" \
                 output_directory:"." output_name:"${APP_NAME_SAFE}-iOS.ipa" \
-                export_team_id:"$TEAM_ID" xcargs:"$XCARGS" clean:true silent:true
+                export_team_id:"$TEAM_ID" xcargs:"$XCARGS" \
+                skip_profile_detection:true export_options:"iOSExportOptions.plist" \
+                clean:true silent:true
             fi
 
             if [ "${{ inputs.target_platform }}" == "macos_only" ] || [ "${{ inputs.target_platform }}" == "all_devices" ]; then
               configure_desktop_pods
               MAC_PROFILE_UUID="${{ steps.mac_provision.outputs.uuid }}"
-              if [ -z "$MAC_PROFILE_UUID" ]; then exit 1; fi
+              MAC_PROFILE_NAME="${{ steps.mac_provision.outputs.name }}"
+              if [ -z "$MAC_PROFILE_UUID" ] || [ -z "$MAC_PROFILE_NAME" ]; then exit 1; fi
 
               BUNDLE_ID="${{ steps.capacitor.outputs.bundle_id }}"
               INSTALLER_CERT_NAME="${{ steps.cert.outputs.installer_cert_name }}"
@@ -908,7 +947,7 @@ jobs:
               echo '    <key>destination</key><string>export</string>' >> MacExportOptions.plist
               echo '    <key>signingStyle</key><string>manual</string>' >> MacExportOptions.plist
               echo '    <key>provisioningProfiles</key><dict>' >> MacExportOptions.plist
-              echo "        <key>$BUNDLE_ID</key><string>$MAC_PROFILE_UUID</string>" >> MacExportOptions.plist
+              echo "        <key>$BUNDLE_ID</key><string>$MAC_PROFILE_NAME</string>" >> MacExportOptions.plist
               echo '    </dict>' >> MacExportOptions.plist
               echo '</dict></plist>' >> MacExportOptions.plist
 
