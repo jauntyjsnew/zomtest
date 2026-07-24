@@ -513,6 +513,7 @@ jobs:
           echo 'post_install do |installer|' >> Podfile
           echo '  installer.pods_project.targets.each do |target|' >> Podfile
           echo '    target.build_configurations.each do |config|' >> Podfile
+          echo '      config.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = "15.0"' >> Podfile
           echo '      config.build_settings["SUPPORTS_MACCATALYST"] = "YES"' >> Podfile
           echo '      config.build_settings["CODE_SIGN_IDENTITY"] = ""' >> Podfile
           echo '      config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"' >> Podfile
@@ -768,6 +769,7 @@ jobs:
               cp Podfile.ios Podfile
               pod install
             fi
+            verify_pod_targets
           }
           configure_desktop_pods() {
             if [ -f "Podfile.ios" ]; then
@@ -776,7 +778,21 @@ jobs:
               rm -f Podfile.bak
               pod install
             fi
+            verify_pod_targets
             /usr/libexec/PlistBuddy -c "Delete :GADApplicationIdentifier" App/Info.plist 2>/dev/null || true
+          }
+          verify_pod_targets() {
+            ruby -e '
+              require "xcodeproj"
+              project = Xcodeproj::Project.open("Pods/Pods.xcodeproj")
+              invalid = project.targets.flat_map do |target|
+                target.build_configurations.filter_map do |config|
+                  value = config.build_settings["IPHONEOS_DEPLOYMENT_TARGET"]
+                  "#{target.name}/#{config.name}=#{value}" if value.to_f < 15.0
+                end
+              end
+              abort("Pod deployment target below iOS 15: #{invalid.join(", ")}") unless invalid.empty?
+            '
           }
           if [ -d "App.xcworkspace" ]; then
             XC_ARG="-workspace App.xcworkspace"
