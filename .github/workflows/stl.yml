@@ -130,7 +130,7 @@ jobs:
           git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Clone
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.repository_url }}
           ref: ${{ inputs.repository_branch }}
@@ -217,11 +217,11 @@ jobs:
           echo "rust_engine_dir=$RUST_ENGINE_DIR" >> $GITHUB_OUTPUT
           echo "wasm_out_dir=$WASM_OUT_DIR" >> $GITHUB_OUTPUT
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ steps.node_version.outputs.version }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}
@@ -241,7 +241,7 @@ jobs:
 
       - name: Cargo Cache
         if: steps.features.outputs.has_rust == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin
@@ -337,15 +337,14 @@ jobs:
           if [ "$TARGET" == "all_devices" ] || [ "$TARGET" == "macos_only" ]; then
             NEEDS_CATALYST="true"
           fi
-          USE_COCOAPODS="false"
-          if [ "$CAP_MAJOR" -ge 8 ] && [ "$NEEDS_CATALYST" == "true" ]; then
-            USE_COCOAPODS="true"
-            if [ ! -d "ios" ]; then npx cap add ios --packagemanager cocoapods 2>/dev/null || npx cap add ios; fi
-            npx cap sync ios --packagemanager cocoapods 2>/dev/null || npx cap sync ios
-          else
-            if [ ! -d "ios" ]; then npx cap add ios; fi
-            npx cap sync ios
+          if [ ! -d "ios/App" ]; then
+            echo "Required native project is missing" >&2
+            exit 1
           fi
+          # The native project and Podfile are committed. Copy web/config assets now;
+          # CocoaPods is installed and resolved in the controlled native steps below.
+          npx cap copy ios
+          USE_COCOAPODS="$NEEDS_CATALYST"
           echo "USE_COCOAPODS=$USE_COCOAPODS" >> $GITHUB_ENV
 
       - name: SPM Clean
@@ -443,7 +442,12 @@ jobs:
           project.save
           "
 
-          if [ -f "Podfile" ]; then pod install; fi
+          if [ -f "Podfile" ]; then
+            pod install || {
+              pod repo remove trunk >/dev/null 2>&1 || true
+              pod install --repo-update
+            }
+          fi
           if [ -f "Podfile" ]; then cp Podfile Podfile.ios; fi
 
       - name: Catalyst
@@ -958,7 +962,8 @@ jobs:
 
       - name: Artifact iOS Sim
         if: inputs.build_mode == 'build_only' && inputs.target_platform == 'all_devices'
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
         with:
           name: ios-sim-${{ github.run_number }}
           path: app/ios/App/${{ env.APP_NAME_SAFE }}-iOS-Simulator.app.zip
@@ -966,7 +971,8 @@ jobs:
 
       - name: Artifact macOS
         if: inputs.build_mode == 'build_only' && inputs.target_platform == 'all_devices'
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
         with:
           name: macos-${{ github.run_number }}
           path: app/ios/App/${{ env.APP_NAME_SAFE }}-macOS.app.zip
@@ -974,7 +980,8 @@ jobs:
 
       - name: Artifact App
         if: inputs.build_mode == 'build_only' && inputs.target_platform != 'all_devices'
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
         with:
           name: app-${{ github.run_number }}
           path: app/ios/App/${{ env.APP_NAME_SAFE }}.app.zip
@@ -1008,7 +1015,8 @@ jobs:
 
       - name: Error Upload
         if: failure()
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
         with:
           name: e-${{ github.run_number }}
           path: ${{ env.error_summary_path }}
@@ -1017,7 +1025,8 @@ jobs:
 
       - name: Logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
         with:
           name: l-${{ github.run_number }}
           path: |
