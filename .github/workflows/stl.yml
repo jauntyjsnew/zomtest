@@ -409,9 +409,22 @@ jobs:
 
       - name: Ruby
         run: |
-          gem install fastlane
-          gem install cocoapods
-          gem install xcodeproj
+          install_gem() {
+            GEM_NAME="$1"
+            for ATTEMPT in 1 2 3 4 5; do
+              if gem install "$GEM_NAME" --no-document; then return 0; fi
+              if [ "$ATTEMPT" -lt 5 ]; then sleep $((ATTEMPT * 15)); fi
+            done
+            return 1
+          }
+
+          command -v fastlane >/dev/null 2>&1 || install_gem fastlane
+          command -v pod >/dev/null 2>&1 || install_gem cocoapods
+          ruby -e "require 'xcodeproj'" >/dev/null 2>&1 || install_gem xcodeproj
+
+          fastlane --version
+          pod --version
+          ruby -e "require 'xcodeproj'; puts Xcodeproj::VERSION"
 
       - name: iOS Target
         working-directory: app/ios/App
