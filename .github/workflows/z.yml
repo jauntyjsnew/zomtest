@@ -1,6 +1,47 @@
 name: Zmbo-and-other
 
 on:
+  workflow_call:
+    inputs:
+      repository_url:
+        required: true
+        type: string
+      repository_branch:
+        required: false
+        type: string
+        default: 'main'
+      version:
+        required: false
+        type: string
+        default: '1.0.0'
+      target_platform:
+        required: false
+        type: string
+        default: 'all_devices'
+      build_mode:
+        required: false
+        type: string
+        default: 'build_only'
+      npm_build_command:
+        required: false
+        type: string
+        default: 'npm run build'
+      provisioning_profile_base64:
+        required: false
+        type: string
+        default: ''
+      mac_provisioning_profile_base64:
+        required: false
+        type: string
+        default: ''
+      mac_category:
+        required: false
+        type: string
+        default: 'public.app-category.utilities'
+      native_rust_engine:
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       repository_url:
@@ -62,6 +103,12 @@ on:
         required: false
         type: string
         default: 'public.app-category.utilities'
+
+      native_rust_engine:
+        description: 'Require native rust-engine'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -185,6 +232,7 @@ jobs:
         working-directory: app
         run: |
           HAS_RUST="false"
+          HAS_NATIVE_RUST="false"
           RUST_ENGINE_DIR=""
           WASM_OUT_DIR=""
           if [ -d "rust" ]; then
@@ -195,7 +243,15 @@ jobs:
               WASM_OUT_DIR="src/wasm/${ENGINE_NAME}-engine"
             fi
           fi
+          if [ -f "rust-engine/Cargo.toml" ] && [ -f "rust-engine/build-ios.sh" ]; then
+            HAS_NATIVE_RUST="true"
+          fi
+          if [ "${{ inputs.native_rust_engine }}" == "true" ] && [ "$HAS_NATIVE_RUST" != "true" ]; then
+            echo "Native rust-engine was required but Cargo.toml or build-ios.sh is missing" >&2
+            exit 1
+          fi
           echo "has_rust=$HAS_RUST" >> $GITHUB_OUTPUT
+          echo "has_native_rust=$HAS_NATIVE_RUST" >> $GITHUB_OUTPUT
           echo "rust_engine_dir=$RUST_ENGINE_DIR" >> $GITHUB_OUTPUT
           echo "wasm_out_dir=$WASM_OUT_DIR" >> $GITHUB_OUTPUT
       
@@ -222,7 +278,7 @@ jobs:
           fi
       
       - name: Cargo Cache
-        if: steps.features.outputs.has_rust == 'true'
+        if: steps.features.outputs.has_rust == 'true' || steps.features.outputs.has_native_rust == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -231,6 +287,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             app/${{ steps.features.outputs.rust_engine_dir }}/target
+            app/rust-engine/target
           key: cargo-${{ runner.os }}-${{ hashFiles('app/**/Cargo.lock', 'app/**/Cargo.toml') }}
           restore-keys: cargo-${{ runner.os }}-
       
@@ -264,14 +321,9 @@ jobs:
         run: ${{ inputs.npm_build_command }}
       
       - name: Rust Engine
+        if: inputs.native_rust_engine == true && steps.features.outputs.has_native_rust == 'true'
         working-directory: app
         run: |
-          # Check if this project has a rust-engine directory
-          if [ ! -d "rust-engine" ]; then
-            echo "No rust-engine found, skipping"
-            exit 0
-          fi
-          
           # Ensure Rust is installed
           if ! command -v rustc &>/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -295,7 +347,25 @@ jobs:
           fi
           
           rustc --version
-          echo "Rust targets ready"
+          cargo test --manifest-path rust-engine/Cargo.toml --workspace --no-fail-fast
+
+          if ! grep -Eq '^lto[[:space:]]*=[[:space:]]*false' rust-engine/Cargo.toml; then
+            echo "rust-engine/Cargo.toml must keep release LTO disabled so FFI symbols survive" >&2
+            exit 1
+          fi
+
+          PLATFORM_NAME=iphoneos EFFECTIVE_PLATFORM_NAME=-iphoneos ARCHS=arm64 \
+            bash rust-engine/build-ios.sh
+          DEVICE_LIB="ios/App/App/Plugins/Sv/lib/device/libsv_engine.a"
+          if [ ! -f "$DEVICE_LIB" ]; then
+            echo "Native device archive was not generated at $DEVICE_LIB" >&2
+            exit 1
+          fi
+          if [ "$(nm "$DEVICE_LIB" 2>/dev/null | grep -c '_rust_sv_load' || true)" -eq 0 ]; then
+            echo "Native device archive is missing _rust_sv_load" >&2
+            exit 1
+          fi
+          echo "Rust targets, tests, and FFI archive verified"
       - name: Sync
         working-directory: app
         env:
@@ -881,7 +951,8 @@ jobs:
               api_key_path:"$API_KEY_PATH" app_identifier:"$BUNDLE_ID" team_id:"$TEAM_ID" \
               ipa:"${APP_NAME_SAFE}-iOS.ipa" platform:"ios" \
               skip_metadata:true skip_screenshots:true \
-              run_precheck_before_submit:false submit_for_review:false
+              run_precheck_before_submit:false submit_for_review:false \
+              skip_app_version_update:true
           fi
 
           MAC_FILE=""
@@ -894,7 +965,8 @@ jobs:
                 api_key_path:"$API_KEY_PATH" app_identifier:"$BUNDLE_ID" team_id:"$TEAM_ID" \
                 ipa:"$MAC_FILE" platform:"osx" \
                 skip_metadata:true skip_screenshots:true \
-                run_precheck_before_submit:false submit_for_review:false
+                run_precheck_before_submit:false submit_for_review:false \
+                skip_app_version_update:true
             else
                fastlane run upload_to_app_store \
                 api_key_path:"$API_KEY_PATH" app_identifier:"$BUNDLE_ID" team_id:"$TEAM_ID" \

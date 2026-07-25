@@ -1,0 +1,62 @@
+name: Native
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository_url:
+        description: 'owner/repo'
+        required: true
+        type: string
+      repository_branch:
+        description: 'Branch'
+        required: false
+        type: string
+        default: 'main'
+      version:
+        description: 'Version'
+        required: true
+        type: string
+        default: '1.0.0'
+      target_platform:
+        description: 'Target'
+        required: true
+        type: choice
+        options:
+          - all_devices
+          - iphone_and_ipad
+          - iphone_only
+          - ipad_only
+          - macos_only
+        default: 'all_devices'
+      build_mode:
+        description: 'Mode'
+        required: true
+        type: choice
+        options:
+          - build_only
+          - publish_to_appstore
+        default: 'build_only'
+      provisioning_profile_base64:
+        description: 'iOS profile base64'
+        required: false
+        type: string
+      mac_provisioning_profile_base64:
+        description: 'Mac Catalyst profile base64'
+        required: false
+        type: string
+
+jobs:
+  build:
+    uses: ./.github/workflows/z.yml
+    secrets: inherit
+    with:
+      repository_url: ${{ inputs.repository_url }}
+      repository_branch: ${{ inputs.repository_branch }}
+      version: ${{ inputs.version }}
+      target_platform: ${{ inputs.target_platform }}
+      build_mode: ${{ inputs.build_mode }}
+      npm_build_command: npm run build
+      provisioning_profile_base64: ${{ inputs.provisioning_profile_base64 }}
+      mac_provisioning_profile_base64: ${{ inputs.mac_provisioning_profile_base64 }}
+      mac_category: public.app-category.graphics-design
+      native_rust_engine: true
