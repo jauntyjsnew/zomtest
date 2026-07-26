@@ -546,18 +546,26 @@ jobs:
             pod install || pod install --repo-update
           fi
           
+          # The pods below have no Mac Catalyst slice, so the Catalyst archive cannot
+          # link them. They ARE valid on iOS. Stripping them from the single shared
+          # Podfile removed them from the iOS archive too — apps shipped with no ad
+          # SDK and no Filesystem plugin, silently. So build TWO Podfiles here and
+          # keep the full iOS one active; Build App swaps to the Catalyst variant
+          # immediately before the Catalyst/macOS archive.
+          cp Podfile Podfile.ios
+
           sed -i.bak '/IONFilesystemLib/d' Podfile
           sed -i.bak '/CapacitorFilesystem/d' Podfile
           sed -i.bak '/Google-Mobile-Ads-SDK/d' Podfile
           sed -i.bak '/GoogleUserMessagingPlatform/d' Podfile
           sed -i.bak '/CapacitorCommunityAdmob/d' Podfile
           rm -f Podfile.bak
-          
+
           if grep -q "post_install" Podfile; then
             sed -i.bak '/^post_install/,/^end$/d' Podfile
             rm -f Podfile.bak
           fi
-          
+
           echo '' >> Podfile
           echo 'post_install do |installer|' >> Podfile
           echo '  installer.pods_project.targets.each do |target|' >> Podfile
@@ -569,8 +577,15 @@ jobs:
           echo '    end' >> Podfile
           echo '  end' >> Podfile
           echo 'end' >> Podfile
-          
+
+          cp Podfile Podfile.catalyst
+
+          # Leave the iOS Podfile active. Nothing has been archived yet, and for
+          # macos_only Build App swaps to Podfile.catalyst before its only archive.
+          cp Podfile.ios Podfile
           pod install
+          echo "iOS pod set active; Catalyst variant staged at Podfile.catalyst"
+          grep -c "pod '" Podfile Podfile.catalyst || true
       
       - name: Pods Target
         working-directory: app/ios/App
@@ -799,6 +814,8 @@ jobs:
 
       - name: Build App
         working-directory: app/ios/App
+        env:
+          CAP_MAJOR: ${{ steps.node_version.outputs.capacitor_major }}
         run: |
           set -o pipefail
           if [ -d "App.xcworkspace" ]; then
@@ -810,6 +827,41 @@ jobs:
           else
             exit 1
           fi
+
+          # Swap in the Catalyst pod set (no AdMob / Filesystem — those have no
+          # Catalyst slice). Called immediately before a Catalyst/macOS archive so
+          # the iOS archive above keeps the full pod set. Re-applies the Pods Target
+          # and Pods Sign tweaks, because pod install regenerates Pods.xcodeproj.
+          use_catalyst_pods() {
+            [ -f Podfile.catalyst ] || return 0
+            echo "Switching to the Catalyst pod set"
+            cp Podfile.catalyst Podfile
+            pod install || { echo "Catalyst pod install failed" >&2; exit 1; }
+
+            if [ "${CAP_MAJOR:-8}" -ge 6 ]; then IOS_TARGET="15.0"
+            elif [ "${CAP_MAJOR:-8}" -eq 5 ]; then IOS_TARGET="13.0"
+            else IOS_TARGET="15.0"; fi
+
+            [ -d "Pods/Pods.xcodeproj" ] || return 0
+            SIGN_TWEAK="false"
+            [ "${{ inputs.build_mode }}" == "publish_to_appstore" ] && SIGN_TWEAK="true"
+            IOS_TARGET="$IOS_TARGET" SIGN_TWEAK="$SIGN_TWEAK" ruby -e '
+            require "xcodeproj"
+            project = Xcodeproj::Project.open("Pods/Pods.xcodeproj")
+            project.targets.each do |target|
+              target.build_configurations.each do |config|
+                config.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = ENV["IOS_TARGET"]
+                if ENV["SIGN_TWEAK"] == "true"
+                  config.build_settings["CODE_SIGN_IDENTITY"] = ""
+                  config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
+                  config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+                  config.build_settings["CODE_SIGN_STYLE"] = "Manual"
+                end
+              end
+            end
+            project.save
+            '
+          }
 
           if [ "${{ inputs.build_mode }}" == "build_only" ]; then
             
@@ -824,7 +876,9 @@ jobs:
               APP_PATH=$(find build-simulator -name "*.app" -type d | head -1)
               cp -R "$APP_PATH" "./${APP_NAME_SAFE}-iOS-Simulator.app"
               zip -r "${APP_NAME_SAFE}-iOS-Simulator.app.zip" "${APP_NAME_SAFE}-iOS-Simulator.app"
-              
+
+              use_catalyst_pods
+
               xcodebuild $XC_ARG \
                 -scheme App -configuration Release \
                 -destination "generic/platform=macOS,variant=Mac Catalyst" \
@@ -845,6 +899,8 @@ jobs:
               zip -r "${APP_NAME_SAFE}-macOS.app.zip" "${APP_NAME_SAFE}-macOS.app"
               
             elif [ "$IS_CATALYST" == "true" ]; then
+              use_catalyst_pods
+
               xcodebuild $XC_ARG \
                 -scheme App -configuration Release \
                 -destination "$DESTINATION" \
@@ -914,7 +970,9 @@ jobs:
               echo '</dict></plist>' >> MacExportOptions.plist
               
               MAC_XCARGS="DEVELOPMENT_TEAM=$TEAM_ID CODE_SIGNING_REQUIRED=YES CODE_SIGNING_ALLOWED=YES PROVISIONING_PROFILE='' PROVISIONING_PROFILE_SPECIFIER=''"
-              
+
+              use_catalyst_pods
+
               fastlane run build_app \
                 $FL_ARG scheme:"App" catalyst_platform:"macos" \
                 output_directory:"." output_name:"${APP_NAME_SAFE}-Mac" \
