@@ -967,22 +967,25 @@ jobs:
 
           if [ -d "$APP_PATH/Contents" ]; then
             ROOT_MANIFEST="$APP_PATH/Contents/Resources/PrivacyInfo.xcprivacy"
+            INFO_PLIST="$APP_PATH/Contents/Info.plist"
           else
             ROOT_MANIFEST="$APP_PATH/PrivacyInfo.xcprivacy"
+            INFO_PLIST="$APP_PATH/Info.plist"
           fi
 
-          if [ ! -f "$ROOT_MANIFEST" ]; then
-            echo "App privacy manifest is missing at $ROOT_MANIFEST" >&2
-            exit 1
+          if [ -f "$ROOT_MANIFEST" ]; then
+            plutil -lint "$ROOT_MANIFEST"
+            ROOT_TRACKING=$(plutil -extract NSPrivacyTracking raw -o - "$ROOT_MANIFEST" 2>/dev/null || true)
+          else
+            ROOT_TRACKING=""
           fi
 
-          plutil -lint "$ROOT_MANIFEST"
-          ROOT_TRACKING=$(plutil -extract NSPrivacyTracking raw -o - "$ROOT_MANIFEST" 2>/dev/null || true)
-          INFO_PLIST="$APP_PATH/Contents/Info.plist"
-          if plutil -extract NSUserTrackingUsageDescription raw -o - "$INFO_PLIST" >/dev/null 2>&1 && [ "$ROOT_TRACKING" != "true" ]; then
-            echo "App privacy manifest must declare NSPrivacyTracking=true" >&2
-            plutil -p "$ROOT_MANIFEST"
-            exit 1
+          if plutil -extract NSUserTrackingUsageDescription raw -o - "$INFO_PLIST" >/dev/null 2>&1; then
+            if [ ! -f "$ROOT_MANIFEST" ] || [ "$ROOT_TRACKING" != "true" ]; then
+              echo "Apps requesting tracking authorization need a privacy manifest with NSPrivacyTracking=true" >&2
+              [ ! -f "$ROOT_MANIFEST" ] || plutil -p "$ROOT_MANIFEST"
+              exit 1
+            fi
           fi
 
           while IFS= read -r MANIFEST; do
