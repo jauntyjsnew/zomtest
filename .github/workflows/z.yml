@@ -977,18 +977,40 @@ jobs:
                 [ ! -f "$ROOT_MANIFEST" ] || plutil -p "$ROOT_MANIFEST"
                 exit 1
               fi
+            elif [ "$ROOT_TRACKING" = "true" ]; then
+              echo "$PLATFORM declares NSPrivacyTracking=true but Info.plist has no NSUserTrackingUsageDescription, so the app can never obtain ATT consent" >&2
+              plutil -p "$ROOT_MANIFEST"
+              exit 1
             fi
 
+            # ITMS-91064 is a BI-DIRECTIONAL constraint and Apple emits the same
+            # message text for both directions (see TN3181, "Possible reasons for an
+            # invalid tracking domains value"):
+            #   domains non-empty  =>  NSPrivacyTracking must be true
+            #   NSPrivacyTracking true  =>  domains must contain one or more entries
+            # Checking only the first direction lets "tracking=true + no domains"
+            # ship and be rejected by App Store Connect.
             while IFS= read -r MANIFEST; do
               plutil -lint "$MANIFEST"
-              if DOMAINS=$(plutil -extract NSPrivacyTrackingDomains json -o - "$MANIFEST" 2>/dev/null); then
-                DOMAIN_COUNT=$(printf '%s' "$DOMAINS" | jq 'length')
-                TRACKING=$(plutil -extract NSPrivacyTracking raw -o - "$MANIFEST" 2>/dev/null || true)
-                if [ "$DOMAIN_COUNT" -eq 0 ] || [ "$TRACKING" != "true" ]; then
-                  echo "$PLATFORM contains an invalid tracking-domain declaration in $MANIFEST" >&2
-                  plutil -p "$MANIFEST"
-                  exit 1
-                fi
+              DOMAINS=$(plutil -extract NSPrivacyTrackingDomains json -o - "$MANIFEST" 2>/dev/null || echo '[]')
+              DOMAIN_COUNT=$(printf '%s' "$DOMAINS" | jq 'length')
+              TRACKING=$(plutil -extract NSPrivacyTracking raw -o - "$MANIFEST" 2>/dev/null || true)
+
+              if [ "$DOMAIN_COUNT" -gt 0 ] && [ "$TRACKING" != "true" ]; then
+                echo "$PLATFORM: $MANIFEST lists $DOMAIN_COUNT tracking domain(s) but NSPrivacyTracking is not true (ITMS-91064)" >&2
+                plutil -p "$MANIFEST"
+                exit 1
+              fi
+
+              if [ "$TRACKING" = "true" ] && [ "$DOMAIN_COUNT" -eq 0 ]; then
+                echo "$PLATFORM: $MANIFEST sets NSPrivacyTracking=true but NSPrivacyTrackingDomains is empty or absent (ITMS-91064)" >&2
+                plutil -p "$MANIFEST"
+                exit 1
+              fi
+
+              COLLECTED=$(plutil -extract NSPrivacyCollectedDataTypes json -o - "$MANIFEST" 2>/dev/null || echo 'absent')
+              if [ "$COLLECTED" != "absent" ] && [ "$(printf '%s' "$COLLECTED" | jq 'length')" -eq 0 ]; then
+                echo "::warning::$PLATFORM: $MANIFEST has an empty NSPrivacyCollectedDataTypes array; Apple DTS advises removing the key entirely"
               fi
             done < <(find "$APP_PATH" -name PrivacyInfo.xcprivacy -type f -print)
 
