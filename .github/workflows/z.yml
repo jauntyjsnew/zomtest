@@ -453,6 +453,20 @@ jobs:
           if [ -z "$PLUGIN_FILE" ] || [ ! -f "$PLUGIN_FILE" ]; then exit 0; fi
           if grep -q "#if !targetEnvironment(macCatalyst)" "$PLUGIN_FILE"; then exit 0; fi
           sed -i.bak 's/CommonFunctionality\.presentCodeRedemptionSheet()/#if !targetEnvironment(macCatalyst)\n            CommonFunctionality.presentCodeRedemptionSheet()\n            #else\n            \/\/ Not available on Mac Catalyst\n            call.reject("Not available on Mac Catalyst")\n            return\n            #endif/g' "$PLUGIN_FILE"
+
+      - name: Privacy Dependencies
+        if: inputs.target_platform == 'all_devices' || inputs.target_platform == 'macos_only'
+        working-directory: app
+        run: |
+          set -euo pipefail
+          while IFS= read -r MANIFEST; do
+            DOMAINS=$(plutil -extract NSPrivacyTrackingDomains json -o - "$MANIFEST" 2>/dev/null || continue)
+            TRACKING=$(plutil -extract NSPrivacyTracking raw -o - "$MANIFEST" 2>/dev/null || true)
+            if [ "$(printf '%s' "$DOMAINS" | jq 'length')" -eq 0 ] && [ "$TRACKING" != "true" ]; then
+              plutil -remove NSPrivacyTrackingDomains "$MANIFEST"
+              echo "Removed empty tracking-domain declaration from $MANIFEST"
+            fi
+          done < <(find node_modules -name PrivacyInfo.xcprivacy -type f -print)
       
       - name: Ruby
         run: |
@@ -930,6 +944,60 @@ jobs:
               fi
             fi
           done
+
+      - name: Privacy Manifest
+        if: inputs.target_platform == 'all_devices' || inputs.target_platform == 'macos_only'
+        working-directory: app/ios/App
+        run: |
+          set -euo pipefail
+
+          APP_PATH=""
+          if [ -d "App.app" ]; then
+            APP_PATH="App.app"
+          elif [ -d "build/Build/Products/Release-maccatalyst/App.app" ]; then
+            APP_PATH="build/Build/Products/Release-maccatalyst/App.app"
+          elif [ -d "build-macos/Build/Products/Release-maccatalyst/App.app" ]; then
+            APP_PATH="build-macos/Build/Products/Release-maccatalyst/App.app"
+          fi
+
+          if [ -z "$APP_PATH" ]; then
+            echo "Exported app was not found for privacy manifest validation" >&2
+            exit 1
+          fi
+
+          if [ -d "$APP_PATH/Contents" ]; then
+            ROOT_MANIFEST="$APP_PATH/Contents/Resources/PrivacyInfo.xcprivacy"
+          else
+            ROOT_MANIFEST="$APP_PATH/PrivacyInfo.xcprivacy"
+          fi
+
+          if [ ! -f "$ROOT_MANIFEST" ]; then
+            echo "App privacy manifest is missing at $ROOT_MANIFEST" >&2
+            exit 1
+          fi
+
+          plutil -lint "$ROOT_MANIFEST"
+          ROOT_TRACKING=$(plutil -extract NSPrivacyTracking raw -o - "$ROOT_MANIFEST" 2>/dev/null || true)
+          INFO_PLIST="$APP_PATH/Contents/Info.plist"
+          if plutil -extract NSUserTrackingUsageDescription raw -o - "$INFO_PLIST" >/dev/null 2>&1 && [ "$ROOT_TRACKING" != "true" ]; then
+            echo "App privacy manifest must declare NSPrivacyTracking=true" >&2
+            plutil -p "$ROOT_MANIFEST"
+            exit 1
+          fi
+
+          while IFS= read -r MANIFEST; do
+            plutil -lint "$MANIFEST"
+            if DOMAINS=$(plutil -extract NSPrivacyTrackingDomains json -o - "$MANIFEST" 2>/dev/null); then
+              TRACKING=$(plutil -extract NSPrivacyTracking raw -o - "$MANIFEST" 2>/dev/null || true)
+              if [ "$TRACKING" != "true" ]; then
+                echo "Invalid tracking declaration in $MANIFEST" >&2
+                plutil -p "$MANIFEST"
+                exit 1
+              fi
+            fi
+          done < <(find "$APP_PATH" -name PrivacyInfo.xcprivacy -type f -print)
+
+          echo "Validated exported privacy manifests in $APP_PATH"
 
       - name: Upload
         if: inputs.build_mode == 'publish_to_appstore'
