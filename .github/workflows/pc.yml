@@ -637,7 +637,7 @@ jobs:
                 <true/>
                 <key>com.apple.security.network.client</key>
                 <true/>
-                <key>com.apple.security.files.user-selected.read-only</key>
+                <key>com.apple.security.files.user-selected.read-write</key>
                 <true/>
               </dict>
               </plist>
@@ -645,7 +645,19 @@ jobs:
               else
                 /usr/libexec/PlistBuddy -c "Add :com.apple.security.app-sandbox bool true" "App/App.entitlements" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :com.apple.security.app-sandbox true" "App/App.entitlements"
                 /usr/libexec/PlistBuddy -c "Add :com.apple.security.network.client bool true" "App/App.entitlements" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :com.apple.security.network.client true" "App/App.entitlements"
-                /usr/libexec/PlistBuddy -c "Add :com.apple.security.files.user-selected.read-only bool true" "App/App.entitlements" 2>/dev/null || true
+                # read-WRITE, not read-only. MEASURED 2026-07-29 on the real XPS Viewer app
+                # built for Mac Catalyst, the SAME binary signed two ways: with only
+                # files.user-selected.read-only AppKit refuses to open the panel --
+                # "your app has the User Selected File Read entitlement but it needs User
+                # Selected File Read/Write to display save panels" -- and the
+                # UIDocumentPickerViewController(forExporting:asCopy:true) delegate is then
+                # never called, so Save hangs with nothing in any log we would look at.
+                # Re-signed with read-write, the identical binary opened the save panel.
+                # asCopy:true does not make this a read-only operation: the system gates the
+                # panel on the write entitlement before any copying is considered.
+                # Delete a stale read-only key first -- a leftover one is what AppKit reads.
+                /usr/libexec/PlistBuddy -c "Delete :com.apple.security.files.user-selected.read-only" "App/App.entitlements" 2>/dev/null || true
+                /usr/libexec/PlistBuddy -c "Add :com.apple.security.files.user-selected.read-write bool true" "App/App.entitlements" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :com.apple.security.files.user-selected.read-write true" "App/App.entitlements"
               fi
               
               cat <<EOF > link_entitlements.rb
