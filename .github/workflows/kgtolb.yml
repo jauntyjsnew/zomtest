@@ -406,14 +406,9 @@ jobs:
 
       - name: Install iOS provisioning profile
         id: ios_profile
-        if: inputs.build_mode == 'publish_to_appstore' && inputs.target_platform != 'macos_only'
+        if: inputs.build_mode == 'publish_to_appstore' && inputs.target_platform != 'macos_only' && inputs.provisioning_profile_base64 != ''
         shell: bash
         run: |
-          if [ -z "${{ inputs.provisioning_profile_base64 }}" ]; then
-            echo "iOS provisioning_profile_base64 is required for this target." >&2
-            exit 1
-          fi
-
           PP_PATH="$RUNNER_TEMP/ios.mobileprovision"
           PP_PLIST="$RUNNER_TEMP/ios-profile.plist"
           echo "${{ inputs.provisioning_profile_base64 }}" | base64 --decode > "$PP_PATH"
@@ -433,14 +428,9 @@ jobs:
 
       - name: Install Mac Catalyst provisioning profile
         id: mac_profile
-        if: inputs.build_mode == 'publish_to_appstore' && (inputs.target_platform == 'all_devices' || inputs.target_platform == 'macos_only')
+        if: inputs.build_mode == 'publish_to_appstore' && (inputs.target_platform == 'all_devices' || inputs.target_platform == 'macos_only') && inputs.mac_provisioning_profile_base64 != ''
         shell: bash
         run: |
-          if [ -z "${{ inputs.mac_provisioning_profile_base64 }}" ]; then
-            echo "mac_provisioning_profile_base64 is required for Mac Catalyst publishing." >&2
-            exit 1
-          fi
-
           PP_PATH="$RUNNER_TEMP/mac.provisionprofile"
           PP_PLIST="$RUNNER_TEMP/mac-profile.plist"
           echo "${{ inputs.mac_provisioning_profile_base64 }}" | base64 --decode > "$PP_PATH"
@@ -458,16 +448,98 @@ jobs:
             echo "name=$NAME"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Auto Profile
+        id: auto_profile
+        if: inputs.build_mode == 'publish_to_appstore'
+        run: |
+          set -uo pipefail
+          IOS_UUID="${{ steps.ios_profile.outputs.uuid }}"
+          MAC_UUID="${{ steps.mac_profile.outputs.uuid }}"
+          NEED_IOS=true
+          NEED_MAC=false
+          if [ "${{ inputs.target_platform }}" = "macos_only" ]; then NEED_IOS=false; fi
+          if [ "${{ inputs.target_platform }}" = "all_devices" ] || [ "${{ inputs.target_platform }}" = "macos_only" ]; then
+            NEED_MAC=true
+          fi
+          if { [ "$NEED_IOS" != "true" ] || [ -n "$IOS_UUID" ]; } && { [ "$NEED_MAC" != "true" ] || [ -n "$MAC_UUID" ]; }; then
+            echo "profiles supplied in the dispatch inputs - nothing to fetch"
+            { echo "ios_uuid="; echo "ios_name="; echo "mac_uuid="; echo "mac_name="; } >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BUNDLE_ID="${{ steps.capacitor.outputs.bundle_id }}"
+          if [ -z "$BUNDLE_ID" ]; then
+            echo "::error::no bundle id - cannot fetch a profile"; exit 1
+          fi
+          API_KEY_CONTENT=$(echo "${{ steps.apple.outputs.api_key_base64 }}" | base64 --decode)
+          API_KEY_PATH="$RUNNER_TEMP/auto_api_key.json"
+          jq -n --arg key_id "${{ steps.apple.outputs.api_key_id }}" \
+                --arg issuer_id "${{ steps.apple.outputs.api_issuer_id }}" \
+                --arg key "$API_KEY_CONTENT" \
+                '{key_id: $key_id, issuer_id: $issuer_id, key: $key, in_house: false}' > "$API_KEY_PATH"
+          export SPACESHIP_SKIP_2FA_UPGRADE=1
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+
+          INSTALLED_UUID=""
+          INSTALLED_NAME=""
+          grab() {
+            # $1 sigh platform, $2 output basename, $3 install extension.
+            # The uuid and name come back in variables rather than on stdout: a
+            # ::add-mask:: directive only registers on stdout, so printing the
+            # value would capture the directive along with it.
+            local PLAT="$1" BASE="$2" EXT="$3"
+            if ! fastlane run get_provisioning_profile \
+                  api_key_path:"$API_KEY_PATH" \
+                  app_identifier:"$BUNDLE_ID" platform:"$PLAT" \
+                  team_id:"${{ steps.apple.outputs.team_id }}" \
+                  skip_install:true output_path:"$RUNNER_TEMP" filename:"$BASE" 2>&1 | tail -6; then
+              echo "::error::could not obtain the $PLAT App Store profile for this app - read the fastlane error above. Only if it mentions FORBIDDEN or authentication does the App Store Connect API key need a wider role."
+              exit 1
+            fi
+            local F="$RUNNER_TEMP/$BASE"
+            [ -f "$F" ] || F=$(find "$RUNNER_TEMP" . -name "$BASE" -type f 2>/dev/null | head -1)
+            if [ ! -f "$F" ]; then echo "::error::$PLAT profile was not written"; exit 1; fi
+            local PL="$RUNNER_TEMP/auto_$PLAT.plist"
+            security cms -D -i "$F" > "$PL"
+            INSTALLED_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" "$PL")
+            INSTALLED_NAME=$(/usr/libexec/PlistBuddy -c "Print Name" "$PL")
+            echo "::add-mask::$INSTALLED_UUID"
+            echo "::add-mask::$INSTALLED_NAME"
+            cp "$F" ~/Library/MobileDevice/Provisioning\ Profiles/$INSTALLED_UUID.$EXT
+          }
+
+          OUT_IOS_UUID=""; OUT_IOS_NAME=""; OUT_MAC_UUID=""; OUT_MAC_NAME=""
+          if [ "$NEED_IOS" = "true" ] && [ -z "$IOS_UUID" ]; then
+            echo "no iOS profile pasted - fetching"
+            grab ios "auto_ios.mobileprovision" mobileprovision
+            OUT_IOS_UUID="$INSTALLED_UUID"; OUT_IOS_NAME="$INSTALLED_NAME"
+            echo "  iOS profile ready"
+          fi
+          if [ "$NEED_MAC" = "true" ] && [ -z "$MAC_UUID" ]; then
+            # "catalyst", not "macos": this pipeline's Mac build is Mac Catalyst,
+            # and exportArchive rejects a plain Mac App Store profile for it.
+            echo "no Mac profile pasted - fetching"
+            grab catalyst "auto_mac.mobileprovision" provisionprofile
+            OUT_MAC_UUID="$INSTALLED_UUID"; OUT_MAC_NAME="$INSTALLED_NAME"
+            echo "  Mac profile ready"
+          fi
+          {
+            echo "ios_uuid=$OUT_IOS_UUID"
+            echo "ios_name=$OUT_IOS_NAME"
+            echo "mac_uuid=$OUT_MAC_UUID"
+            echo "mac_name=$OUT_MAC_NAME"
+          } >> $GITHUB_OUTPUT
+
       - name: Apply manual signing
         if: inputs.build_mode == 'publish_to_appstore'
         working-directory: app/ios/App
         shell: bash
         env:
           TEAM_ID: ${{ steps.apple.outputs.team_id }}
-          IOS_PROFILE_UUID: ${{ steps.ios_profile.outputs.uuid }}
-          IOS_PROFILE_NAME: ${{ steps.ios_profile.outputs.name }}
-          MAC_PROFILE_UUID: ${{ steps.mac_profile.outputs.uuid }}
-          MAC_PROFILE_NAME: ${{ steps.mac_profile.outputs.name }}
+          IOS_PROFILE_UUID: ${{ steps.ios_profile.outputs.uuid || steps.auto_profile.outputs.ios_uuid }}
+          IOS_PROFILE_NAME: ${{ steps.ios_profile.outputs.name || steps.auto_profile.outputs.ios_name }}
+          MAC_PROFILE_UUID: ${{ steps.mac_profile.outputs.uuid || steps.auto_profile.outputs.mac_uuid }}
+          MAC_PROFILE_NAME: ${{ steps.mac_profile.outputs.name || steps.auto_profile.outputs.mac_name }}
           TARGET_PLATFORM: ${{ inputs.target_platform }}
         run: |
           ruby - <<'RUBY'
@@ -600,7 +672,7 @@ jobs:
           APP_NAME_SAFE: ${{ steps.capacitor.outputs.app_name_safe }}
           TEAM_ID: ${{ steps.apple.outputs.team_id }}
           BUNDLE_ID: ${{ steps.capacitor.outputs.bundle_id }}
-          IOS_PROFILE_NAME: ${{ steps.ios_profile.outputs.name }}
+          IOS_PROFILE_NAME: ${{ steps.ios_profile.outputs.name || steps.auto_profile.outputs.ios_name }}
         run: |
           if [ -d "App.xcworkspace" ]; then
             FL_ARG="workspace:App.xcworkspace"
@@ -643,7 +715,7 @@ jobs:
           APP_NAME_SAFE: ${{ steps.capacitor.outputs.app_name_safe }}
           TEAM_ID: ${{ steps.apple.outputs.team_id }}
           BUNDLE_ID: ${{ steps.capacitor.outputs.bundle_id }}
-          MAC_PROFILE_NAME: ${{ steps.mac_profile.outputs.name }}
+          MAC_PROFILE_NAME: ${{ steps.mac_profile.outputs.name || steps.auto_profile.outputs.mac_name }}
           INSTALLER_CERT_NAME: ${{ steps.cert.outputs.installer_cert_name }}
         run: |
           if [ -d "App.xcworkspace" ]; then
