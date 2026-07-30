@@ -1041,6 +1041,17 @@ jobs:
               ROOT_TRACKING=""
             fi
 
+            # A manifest that exists in the repo but not in the built app declares
+            # nothing at all. Shipping one is worse than shipping none, because the
+            # source file is then read as proof ("we declare NSPrivacyTracking=false")
+            # while the binary Apple reviews carries no declaration. This happens
+            # silently whenever the file is not in the App target's Copy Bundle
+            # Resources phase.
+            if [ -f "App/PrivacyInfo.xcprivacy" ] && [ ! -f "$ROOT_MANIFEST" ]; then
+              echo "$PLATFORM: the repo ships App/PrivacyInfo.xcprivacy but the built app has no root manifest at $ROOT_MANIFEST — add it to the App target's Copy Bundle Resources phase in App.xcodeproj" >&2
+              exit 1
+            fi
+
             if plutil -extract NSUserTrackingUsageDescription raw -o - "$INFO_PLIST" >/dev/null 2>&1; then
               if [ ! -f "$ROOT_MANIFEST" ] || [ "$ROOT_TRACKING" != "true" ]; then
                 echo "$PLATFORM requests ATT but its root privacy manifest does not declare NSPrivacyTracking=true" >&2
