@@ -1,4 +1,4 @@
-name: st-Native-L
+name: stL-Native
 
 on:
   workflow_dispatch:
