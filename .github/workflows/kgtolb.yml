@@ -16,10 +16,10 @@ on:
         default: "main"
 
       version:
-        description: "Version, for example 1.0.0"
+        description: 'Version — leave EMPTY to take it from App Store Connect automatically'
         required: false
         type: string
-        default: "1.0.0"
+        default: ''
 
       target_platform:
         description: "Target"
@@ -261,13 +261,33 @@ jobs:
         shell: bash
         run: pod install
 
+      # Reads the next version straight from App Store Connect so the run never has to
+      # ask. Highest versionString across iOS + macOS wins; still open -> reuse it,
+      # already live -> +1. Filling the "version" input overrides all of this.
+      - name: Auto Version Script
+        uses: actions/checkout@v4
+        with:
+          path: .wf
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Auto Version
+        id: autover
+        env:
+          ASC_KEY_ID: ${{ steps.apple.outputs.api_key_id }}
+          ASC_ISSUER_ID: ${{ steps.apple.outputs.api_issuer_id }}
+          ASC_KEY_B64: ${{ steps.apple.outputs.api_key_base64 }}
+          BUNDLE_ID: ${{ steps.capacitor.outputs.bundle_id }}
+          MANUAL_VERSION: ${{ inputs.version }}
+          BUILD_MODE: ${{ inputs.build_mode }}
+        run: node "$GITHUB_WORKSPACE/.wf/.github/scripts/autover.cjs"
+
       - name: Prepare Xcode project
         working-directory: app/ios/App
         shell: bash
         env:
           BUNDLE_ID: ${{ steps.capacitor.outputs.bundle_id }}
           APP_NAME: ${{ steps.capacitor.outputs.app_name }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.autover.outputs.version }}
           TARGET_PLATFORM: ${{ inputs.target_platform }}
           MAC_CATEGORY: ${{ inputs.mac_category }}
         run: |

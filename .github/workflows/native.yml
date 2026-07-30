@@ -13,10 +13,10 @@ on:
         type: string
         default: 'main'
       version:
-        description: 'Version'
-        required: true
+        description: 'Version — leave EMPTY to take it from App Store Connect automatically'
+        required: false
         type: string
-        default: '1.0.0'
+        default: ''
       target_platform:
         description: 'Target'
         required: true
