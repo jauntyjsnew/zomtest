@@ -105,7 +105,7 @@ on:
         default: 'public.app-category.utilities'
 
       native_rust_engine:
-        description: 'Require native rust-engine'
+        description: 'Leave OFF. Guard only: fails the build if rust-engine/ is missing'
         required: false
         type: boolean
         default: false
