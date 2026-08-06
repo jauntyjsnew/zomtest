@@ -548,6 +548,29 @@ jobs:
         if: inputs.target_platform == 'all_devices' || inputs.target_platform == 'macos_only'
         working-directory: app/ios/App
         run: |
+          # ── @capacitor/filesystem: PIN v6, do not amputate ──────────────────
+          # v7+ depends on IONFilesystemLib, which is a PREBUILT xcframework with
+          # no maccatalyst slice, so the Catalyst target cannot link it and this
+          # job used to delete the pod outright. Deleting it does NOT remove
+          # FilesystemPlugin from packageClassList, so the app kept asking
+          # Capacitor for a class that was not in the binary and every save died
+          # at runtime with `"Filesystem" plugin is not implemented on ios` —
+          # with nothing in the build log.
+          # v6 has no IONFilesystemLib (pure Swift, `import Capacitor` only), so
+          # pin it instead of amputating. Proven in a shipped build: winmailRush
+          # 1.0.10 Mac leg (dumlutest run 30582347614) pinned v6, installed
+          # CapacitorFilesystem 6.0.4, embedded the framework and archived.
+          # Safe HERE specifically: `cap sync` and `SPM Clean` have already run,
+          # so nothing downstream resolves this package through SPM.
+          if [ -f "../../node_modules/@capacitor/filesystem/package.json" ]; then
+            FS_VER=$(node -p "require('../../node_modules/@capacitor/filesystem/package.json').version" 2>/dev/null || echo "")
+            FS_MAJOR="${FS_VER%%.*}"
+            if [ -n "$FS_MAJOR" ] && [ "$FS_MAJOR" -ge 7 ] 2>/dev/null; then
+              echo "::notice::@capacitor/filesystem $FS_VER cannot link for Mac Catalyst (IONFilesystemLib.xcframework has no maccatalyst slice) — pinning v6 so the feature survives."
+              (cd ../.. && npm install @capacitor/filesystem@^6.0.4 --legacy-peer-deps) || echo "::warning::filesystem downgrade failed — the pod will be stripped and every Filesystem call in this binary will fail at runtime."
+            fi
+          fi
+
           if [ ! -f "Podfile" ]; then
             echo "platform :ios, '15.0'" > Podfile
             echo "target 'App' do" >> Podfile
@@ -574,8 +597,13 @@ jobs:
           # immediately before the Catalyst/macOS archive.
           cp Podfile Podfile.ios
 
-          sed -i.bak '/IONFilesystemLib/d' Podfile
-          sed -i.bak '/CapacitorFilesystem/d' Podfile
+          # Only amputate Filesystem if the pin above did not take effect — a v6
+          # podspec has no IONFilesystemLib dependency and links fine on Catalyst.
+          if grep -qs "IONFilesystemLib" ../../node_modules/@capacitor/filesystem/CapacitorFilesystem.podspec; then
+            echo "::warning::stripping CapacitorFilesystem — every Filesystem call in this binary will fail at runtime."
+            sed -i.bak '/IONFilesystemLib/d' Podfile
+            sed -i.bak '/CapacitorFilesystem/d' Podfile
+          fi
           sed -i.bak '/Google-Mobile-Ads-SDK/d' Podfile
           sed -i.bak '/GoogleUserMessagingPlatform/d' Podfile
           sed -i.bak '/CapacitorCommunityAdmob/d' Podfile
