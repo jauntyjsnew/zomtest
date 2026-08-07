@@ -7,7 +7,7 @@ on:
         description: 'owner/repo'
         required: true
         type: string
-        default: 'jauntyjsnew/OLMviewer'
+        default: 'jauntyjsnew/olm-viewer-KisiselHesap'
       
       repository_branch:
         description: 'Branch'
