@@ -1,4 +1,4 @@
-name: OLM Viewer
+name: OLM
 
 on:
   workflow_dispatch:
