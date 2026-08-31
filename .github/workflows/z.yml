@@ -357,7 +357,9 @@ jobs:
           rustup target add x86_64-apple-ios
           
           # Add Mac Catalyst targets if needed
+          NEEDS_CATALYST=false
           if [ "${{ inputs.target_platform }}" == "all_devices" ] || [ "${{ inputs.target_platform }}" == "macos_only" ]; then
+            NEEDS_CATALYST=true
             rustup target add aarch64-apple-ios-macabi
             rustup target add x86_64-apple-ios-macabi
           fi
@@ -375,8 +377,27 @@ jobs:
             exit 1
           fi
 
-          PLATFORM_NAME=iphoneos EFFECTIVE_PLATFORM_NAME=-iphoneos ARCHS=arm64 \
-            bash rust-engine/build-ios.sh
+          # ⛔ Bu blok macabi hedeflerini YUKARIDA kuruyordu ama build-ios.sh'ı
+          #    YALNIZ iphoneos için çağırıyordu — yani Catalyst dilimi HİÇ
+          #    üretilmiyordu ve aşağıdaki doğrulama da yalnız device arşivine
+          #    baktığı için bunu söylemiyordu. Gereken her platform için çağır.
+          run_slice() {
+            label="$1"; shift
+            echo "::group::build-ios.sh ($label)"
+            env "$@" bash rust-engine/build-ios.sh
+            echo "::endgroup::"
+          }
+          run_slice device \
+            SDK_NAME=iphoneos PLATFORM_NAME=iphoneos EFFECTIVE_PLATFORM_NAME=-iphoneos ARCHS=arm64
+          run_slice simulator \
+            SDK_NAME=iphonesimulator PLATFORM_NAME=iphonesimulator EFFECTIVE_PLATFORM_NAME=-iphonesimulator "ARCHS=arm64 x86_64"
+          if [ "$NEEDS_CATALYST" = true ]; then
+            # Mac'ler hem Apple Silicon hem Intel; tek arch'lı bir Catalyst
+            # dilimi kullanıcıların yarısına HİÇ ulaşmaz.
+            run_slice "mac catalyst" \
+              SDK_NAME=macosx PLATFORM_NAME=macosx EFFECTIVE_PLATFORM_NAME=-maccatalyst IS_MACCATALYST=YES "ARCHS=arm64 x86_64"
+          fi
+
           DEVICE_LIB="ios/App/App/Plugins/Sv/lib/device/libsv_engine.a"
           if [ ! -f "$DEVICE_LIB" ]; then
             echo "Native device archive was not generated at $DEVICE_LIB" >&2
@@ -386,7 +407,23 @@ jobs:
             echo "Native device archive is missing _rust_sv_load" >&2
             exit 1
           fi
-          echo "Rust targets, tests, and FFI archive verified"
+
+          # Ne üretildiğini SÖYLE, ve Catalyst istendiyse iki arch'ı ŞART KOŞ.
+          echo "Static archives produced:"
+          CAT_OK=0
+          while IFS= read -r a; do
+            archs="$(lipo -archs "$a" 2>/dev/null | tr '\n' ' ')"
+            plats="$(otool -l "$a" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/^ *platform/{print $2; f=0}' | sort -u | tr '\n' ' ')"
+            printf '  %-58s archs=%-16s platform=%s\n' "${a#./}" "$archs" "$plats"
+            case " $plats " in *" 6 "*)
+              case "$archs" in *arm64*) case "$archs" in *x86_64*) CAT_OK=1 ;; esac ;; esac ;;
+            esac
+          done < <(find rust-engine ios -name '*.a' -not -path '*/deps/*' -not -path '*/build/*' 2>/dev/null | sort)
+          if [ "$NEEDS_CATALYST" = true ] && [ "$CAT_OK" -ne 1 ]; then
+            echo "::error::No Mac Catalyst archive carrying BOTH arm64 and x86_64 was produced (platform 6 = MACCATALYST)."
+            exit 1
+          fi
+          echo "Rust targets, tests, and FFI archives verified"
       - name: Sync
         working-directory: app
         env:
